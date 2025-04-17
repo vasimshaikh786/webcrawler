@@ -66,7 +66,7 @@ def find_forms(html_content, base_url, current_url):
     return [{"url": url} for url in form_actions]
 
 def find_phone_numbers(html_content, current_url):
-    """Finds and formats phone numbers in the HTML content."""
+    """Finds and formats phone numbers in the HTML content (handling NoneType)."""
     phone_number_pattern = re.compile(
         r'''
         (?:Call us on|PHONE :|TOLL FREE :)?  # Optional preceding text
@@ -84,11 +84,12 @@ def find_phone_numbers(html_content, current_url):
     phone_numbers = set(re.findall(phone_number_pattern, html_content))
     valid_phone_numbers = []
     for number in phone_numbers:
-        cleaned_number = "".join(filter(str.isdigit, number))
-        if len(cleaned_number) >= 7:
-            valid_phone_numbers.append(number.strip())  # Keep the original formatting and strip whitespace
+        if number is not None:  # Check if number is not None
+            cleaned_number = "".join(filter(str.isdigit, number))
+            if len(cleaned_number) >= 7:
+                valid_phone_numbers.append(number.strip())  # Keep the original formatting and strip whitespace
 
-    return [{"number": number, "location": current_url} for number in set(valid_phone_numbers)] # Use set to avoid duplicates
+    return [{"number": number, "location": current_url} for number in set(valid_phone_numbers) if number is not None] # Filter out None again for safety
 
 def crawl_website(start_url):
     """Crawls the website and extracts information."""
