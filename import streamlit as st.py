@@ -66,23 +66,29 @@ def find_forms(html_content, base_url, current_url):
     return [{"url": url} for url in form_actions]
 
 def find_phone_numbers(html_content, current_url):
-    """Finds phone numbers in the HTML content (more comprehensive pattern)."""
+    """Finds and formats phone numbers in the HTML content."""
     phone_number_pattern = re.compile(
         r'''
-        (\+?\d{1,4}[-\s.]?)?   # Optional country code with separator
-        \(?\d{2,4}\)?           # Optional area code in parentheses
-        [-\s.]?                # Optional separator
-        \d{2,4}                 # First part of the number
-        [-\s.]?                # Optional separator
-        \d{3,4}                 # Last part of the number
-        ([-\s.]?\d{3,5})?       # Optional extension
+        (?:Call us on|PHONE :|TOLL FREE :)?  # Optional preceding text
+        \s* # Optional whitespace
+        (\+?\d{1,4}[-\s.]?)?                 # Optional country code
+        \(?\d{2,4}\)?                       # Optional area code
+        [-\s.]?                              # Optional separator
+        \d{2,4}                               # First part
+        [-\s.]?                              # Optional separator
+        \d{3,4}                               # Last part
+        ([-\s.]?\d{3,5})?                     # Optional extension
         ''',
         re.VERBOSE | re.IGNORECASE
     )
     phone_numbers = set(re.findall(phone_number_pattern, html_content))
-    # Further filtering to remove very short matches and potential noise
-    valid_phone_numbers = [number for number in phone_numbers if len("".join(filter(str.isdigit, number))) >= 7]
-    return [{"number": number, "location": current_url} for number in valid_phone_numbers]
+    valid_phone_numbers = []
+    for number in phone_numbers:
+        cleaned_number = "".join(filter(str.isdigit, number))
+        if len(cleaned_number) >= 7:
+            valid_phone_numbers.append(number.strip())  # Keep the original formatting and strip whitespace
+
+    return [{"number": number, "location": current_url} for number in set(valid_phone_numbers)] # Use set to avoid duplicates
 
 def crawl_website(start_url):
     """Crawls the website and extracts information."""
