@@ -3,7 +3,7 @@ import requests
 from bs4 import BeautifulSoup
 import re
 from urllib.parse import urljoin, urlparse
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 from io import BytesIO
 
 def is_valid_url(url):
@@ -35,10 +35,19 @@ def find_images(html_content, base_url, current_url):
             try:
                 img_response = requests.get(absolute_url, stream=True, timeout=5)
                 img_response.raise_for_status()
-                image = Image.open(BytesIO(img_response.content))
-                images_data.append({"original_url": absolute_url, "location": current_url, "image": image})
+                content_type = img_response.headers.get('Content-Type')
+                if content_type and content_type.startswith('image/'):
+                    try:
+                        image = Image.open(BytesIO(img_response.content))
+                        images_data.append({"original_url": absolute_url, "location": current_url, "image": image})
+                    except UnidentifiedImageError as e:
+                        st.warning(f"Could not open image from {absolute_url}: {e}")
+                else:
+                    st.warning(f"Skipping non-image file: {absolute_url} (Content-Type: {content_type})")
             except requests.exceptions.RequestException as e:
-                st.warning(f"Could not retrieve image from {absolute_url}: {e}")
+                st.warning(f"Could not retrieve resource from {absolute_url}: {e}")
+            except UnidentifiedImageError as e:
+                st.warning(f"Could not identify image format from {absolute_url}: {e}")
     return images_data
 
 def find_forms(html_content, base_url, current_url):
