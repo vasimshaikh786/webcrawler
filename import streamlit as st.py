@@ -26,8 +26,18 @@ def fetch_page_content(url):
         st.error(f"Error fetching {url}: {e}")
         return None, None
 
+def scan_image_for_phone_numbers(image):
+    """Scans an image for phone numbers using OCR."""
+    try:
+        import pytesseract
+        text = pytesseract.image_to_string(image)
+        return find_phone_numbers(text, "Image")
+    except ImportError:
+        st.error("pytesseract is not installed. Install it to enable image scanning.")
+        return []
+
 def find_images(html_content, base_url, current_url):
-    """Finds images in the HTML content."""
+    """Finds images in the HTML content and scans them for phone numbers."""
     soup = BeautifulSoup(html_content, 'html.parser')
     images_data = []
     for img_tag in soup.find_all('img'):
@@ -42,34 +52,43 @@ def find_images(html_content, base_url, current_url):
                     try:
                         image = Image.open(BytesIO(img_response.content))
                         images_data.append({"original_url": absolute_url, "location": current_url, "image": image})
+                        # Scan the image for phone numbers
+                        phone_numbers_from_image = scan_image_for_phone_numbers(image)
+                        if phone_numbers_from_image:
+                            st.info(f"Phone numbers found in image at {absolute_url}: {phone_numbers_from_image}")
                     except UnidentifiedImageError as e:
                         st.warning(f"Could not open image from {absolute_url}: {e}")
                 else:
                     st.warning(f"Skipping non-image file: {absolute_url} (Content-Type: {content_type})")
             except requests.exceptions.RequestException as e:
                 st.warning(f"Could not retrieve resource from {absolute_url}: {e}")
-            except UnidentifiedImageError as e:
-                st.warning(f"Could not identify image format from {absolute_url}: {e}")
     return images_data
 
 def find_forms(html_content, base_url, current_url):
-    """Finds forms in the HTML content and extracts relevant information."""
+    """Finds forms in the HTML content, including those in iframes."""
     soup = BeautifulSoup(html_content, 'html.parser')
-    form_actions = set()
+    form_data = []
     for form_tag in soup.find_all('form'):
         action = form_tag.get('action')
+        name = form_tag.get('name', 'Unnamed Form')
         if action:
             absolute_url = urljoin(base_url, action)
-            form_actions.add(absolute_url)
-        # You might want to add more logic here to identify form types based on keywords
-        # or input fields. For simplicity, we are just extracting form URLs.
-    return [{"url": url} for url in form_actions]
+            form_data.append({"url": absolute_url, "name": name})
+    # Check for iframes and scan their content for forms
+    for iframe_tag in soup.find_all('iframe'):
+        iframe_src = iframe_tag.get('src')
+        if iframe_src:
+            iframe_url = urljoin(base_url, iframe_src)
+            iframe_content, _ = fetch_page_content(iframe_url)
+            if iframe_content:
+                form_data.extend(find_forms(iframe_content, base_url, iframe_url))
+    return form_data
 
 def find_phone_numbers(html_content, current_url):
-    """Finds and formats phone numbers in the HTML content (handling NoneType)."""
+    """Finds and formats phone numbers in the HTML content."""
     phone_number_pattern = re.compile(
         r'''
-        (?:Call us on|PHONE :|TOLL FREE :)?  # Optional preceding text
+        (?:Call(?:\s+us)?(?:\s+on)?|call/text|phone(?:\s+number)?|Toll(?:\s+free)?:?)?  # Optional preceding text
         \s* # Optional whitespace
         (\+?\d{1,4}[-\s.]?)?                 # Optional country code
         \(?\d{2,4}\)?                       # Optional area code
@@ -89,7 +108,7 @@ def find_phone_numbers(html_content, current_url):
             if len(cleaned_number) >= 7:
                 valid_phone_numbers.append(number.strip())  # Keep the original formatting and strip whitespace
 
-    return [{"number": number, "location": current_url} for number in set(valid_phone_numbers) if number is not None] # Filter out None again for safety
+    return [{"number": number, "location": current_url} for number in set(valid_phone_numbers) if number is not None]
 
 def crawl_website(start_url):
     """Crawls the website and extracts information."""
