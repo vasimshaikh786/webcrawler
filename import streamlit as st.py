@@ -33,7 +33,10 @@ def scan_image_for_phone_numbers(image):
         text = pytesseract.image_to_string(image)
         return find_phone_numbers(text, "Image")
     except ImportError:
-        st.error("pytesseract is not installed. Install it to enable image scanning.")
+        st.warning("pytesseract is not installed. Skipping image scanning.")
+        return []
+    except Exception as e:
+        st.warning(f"Error during OCR processing: {e}")
         return []
 
 def find_images(html_content, base_url, current_url):
@@ -43,6 +46,10 @@ def find_images(html_content, base_url, current_url):
     for img_tag in soup.find_all('img'):
         img_src = img_tag.get('src')
         if img_src:
+            # Skip data URLs (e.g., inline SVGs or base64-encoded images)
+            if img_src.startswith("data:"):
+                st.warning(f"Skipping data URL image in {current_url}")
+                continue
             absolute_url = urljoin(base_url, img_src)
             try:
                 img_response = requests.get(absolute_url, stream=True, timeout=5)
@@ -53,9 +60,12 @@ def find_images(html_content, base_url, current_url):
                         image = Image.open(BytesIO(img_response.content))
                         images_data.append({"original_url": absolute_url, "location": current_url, "image": image})
                         # Scan the image for phone numbers
-                        phone_numbers_from_image = scan_image_for_phone_numbers(image)
-                        if phone_numbers_from_image:
-                            st.info(f"Phone numbers found in image at {absolute_url}: {phone_numbers_from_image}")
+                        try:
+                            phone_numbers_from_image = scan_image_for_phone_numbers(image)
+                            if phone_numbers_from_image:
+                                st.info(f"Phone numbers found in image at {absolute_url}: {phone_numbers_from_image}")
+                        except Exception as e:
+                            st.warning(f"Error scanning image at {absolute_url}: {e}")
                     except UnidentifiedImageError as e:
                         st.warning(f"Could not open image from {absolute_url}: {e}")
                 else:
