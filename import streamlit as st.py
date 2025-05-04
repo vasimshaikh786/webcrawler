@@ -15,11 +15,11 @@ def find_elements(base_url, max_pages=10):
     queue = [base_url]
     session = requests.Session()
     
-    # Comprehensive phone number regex pattern
+    # Enhanced phone number regex
     phone_pattern = re.compile(
-        r'(\b|\+)(\d{1,3})?[-. ]?\(?\d{3}\)?[-. ]?\d{3}[-. ]?\d{4}\b|'  # Standard US/Intl
-        r'\b\d{3}[-. ]?\d{4}\b|'  # Local numbers
-        r'\b(Toll[- ]?Free|Call|Phone|Tel|Telephone)[: ]?[- ]?(\d{3}[-. ]?)?\(?\d{3}\)?[-. ]?\d{3}[-. ]?\d{4}\b',  # Labeled numbers
+        r'(\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b|'
+        r'\b\d{3}[-.\s]?\d{4}\b|'
+        r'\b(Toll[- ]?Free|Call|Phone|Tel|Telephone|Contact)[: ]?[- ]?(\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b',
         re.IGNORECASE
     )
     
@@ -43,22 +43,35 @@ def find_elements(base_url, max_pages=10):
                 if response.status_code == 200:
                     soup = BeautifulSoup(response.text, 'html.parser')
                     
-                    # Check for forms
-                    if soup.find_all('form'):
-                        st.session_state.form_urls.append(url)
-                        st.success(f"✅ Form found at: {url}")
+                    # Enhanced form detection
+                    form_elements = soup.find_all(['form', 'div', 'section'], class_=re.compile(r'form|contact|request', re.I))
+                    if form_elements:
+                        is_form = False
+                        for element in form_elements:
+                            # Check for actual form tags or divs with form-like content
+                            if element.name == 'form' or (element.find(['input', 'textarea', 'button']) and 
+                                                         any(term in element.get('class', [''])[0].lower() 
+                                                         for term in ['form', 'contact', 'request'] if element.get('class')):
+                                is_form = True
+                                break
+                        
+                        if is_form and url not in st.session_state.form_urls:
+                            st.session_state.form_urls.append(url)
+                            st.success(f"✅ Form found at: {url}")
                     
-                    # Check for phone numbers
+                    # Phone number detection
                     text = soup.get_text()
                     for match in phone_pattern.finditer(text):
                         phone = match.group()
                         context = text[max(0, match.start()-20):match.end()+20].strip()
-                        st.session_state.phone_numbers.append({
-                            'phone': phone,
-                            'url': url,
-                            'context': context
-                        })
-                        st.success(f"📞 Phone number found: {phone}")
+                        # Check if this number was already found on this page
+                        if not any(p['phone'] == phone and p['url'] == url for p in st.session_state.phone_numbers):
+                            st.session_state.phone_numbers.append({
+                                'phone': phone,
+                                'url': url,
+                                'context': context
+                            })
+                            st.success(f"📞 Phone number found: {phone}")
                     
                     visited.add(url)
                     
@@ -66,9 +79,10 @@ def find_elements(base_url, max_pages=10):
                     for link in soup.find_all('a', href=True):
                         href = link['href']
                         absolute_url = urljoin(url, href)
-                        if urlparse(absolute_url).netloc == urlparse(base_url).netloc:
-                            if absolute_url not in visited and absolute_url not in queue:
-                                queue.append(absolute_url)
+                        if (urlparse(absolute_url).netloc == urlparse(base_url).netloc and 
+                            absolute_url not in visited and 
+                            absolute_url not in queue):
+                            queue.append(absolute_url)
                                 
             except Exception as e:
                 st.error(f"⚠️ Error scanning {url[:50]}...: {str(e)[:100]}")
@@ -115,7 +129,7 @@ def main():
     
     col1, col2 = st.columns(2)
     with col1:
-        base_url = st.text_input("Website URL:", placeholder="https://example.com")
+        base_url = st.text_input("Website URL:", placeholder="https://example.com", value="https://kreativedgeinteriors.com")
     with col2:
         max_pages = st.number_input("Max pages to scan:", min_value=1, max_value=50, value=10)
     
