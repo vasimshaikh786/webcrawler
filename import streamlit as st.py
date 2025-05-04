@@ -1,206 +1,149 @@
-import streamlit as st
+import re
 import requests
 from bs4 import BeautifulSoup
-import re
 from urllib.parse import urljoin, urlparse
-from PIL import Image, UnidentifiedImageError
-from io import BytesIO
-import time
+from concurrent.futures import ThreadPoolExecutor
+import pytesseract
+from PIL import Image
+import io
 
-def is_valid_url(url):
-    """Checks if the given URL is valid."""
-    try:
-        result = urlparse(url)
-        return all([result.scheme, result.netloc])
-    except ValueError:
-        return False
+class WebCrawler:
+    def __init__(self, base_url, max_pages=50):
+        self.base_url = base_url
+        self.domain = urlparse(base_url).netloc
+        self.visited = set()
+        self.max_pages = max_pages
+        self.forms = []
+        self.phone_numbers = []
+        self.images_with_phones = []
+        self.phone_pattern = re.compile(
+            r'(\+\d{1,3}[-.\s]?)?(\d{1,4}[-.\s]?)?(\(\d{1,4}\)[-.\s]?)?\d{1,4}[-.\s]?\d{1,4}[-.\s]?\d{1,9}'
+        )
 
-def fetch_page_content(url):
-    """Fetches the content of a given URL with a custom User-Agent."""
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
-    try:
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()  # Raise an exception for bad status codes
-        return response.text, response.url
-    except requests.exceptions.RequestException as e:
-        st.error(f"Error fetching {url}: {e}")
-        return None, None
+    def is_valid_url(self, url):
+        parsed = urlparse(url)
+        return bool(parsed.netloc) and parsed.netloc == self.domain
 
-def scan_image_for_phone_numbers(image):
-    """Scans an image for phone numbers using OCR."""
-    try:
-        import pytesseract
-        text = pytesseract.image_to_string(image)
-        return find_phone_numbers(text, "Image")
-    except ImportError:
-        st.warning("pytesseract is not installed. Skipping image scanning.")
-        return []
-    except Exception as e:
-        st.warning(f"Error during OCR processing: {e}")
-        return []
+    def get_absolute_url(self, url):
+        return urljoin(self.base_url, url)
 
-def find_images(html_content, base_url, current_url):
-    """Finds images in the HTML content and scans them for phone numbers."""
-    soup = BeautifulSoup(html_content, 'html.parser')
-    images_data = []
-    for img_tag in soup.find_all('img'):
-        img_src = img_tag.get('src')
-        if img_src:
-            # Skip data URLs (e.g., inline SVGs or base64-encoded images)
-            if img_src.startswith("data:"):
-                st.warning(f"Skipping data URL image in {current_url}")
-                continue
-            absolute_url = urljoin(base_url, img_src)
-            try:
-                img_response = requests.get(absolute_url, stream=True, timeout=5)
-                img_response.raise_for_status()
-                content_type = img_response.headers.get('Content-Type')
-                if content_type and content_type.startswith('image/'):
-                    try:
-                        image = Image.open(BytesIO(img_response.content))
-                        images_data.append({"original_url": absolute_url, "location": current_url, "image": image})
-                        # Scan the image for phone numbers
-                        try:
-                            phone_numbers_from_image = scan_image_for_phone_numbers(image)
-                            if phone_numbers_from_image:
-                                st.info(f"Phone numbers found in image at {absolute_url}: {phone_numbers_from_image}")
-                        except Exception as e:
-                            st.warning(f"Error scanning image at {absolute_url}: {e}")
-                    except UnidentifiedImageError as e:
-                        st.warning(f"Could not open image from {absolute_url}: {e}")
-                else:
-                    st.warning(f"Skipping non-image file: {absolute_url} (Content-Type: {content_type})")
-            except requests.exceptions.RequestException as e:
-                st.warning(f"Could not retrieve resource from {absolute_url}: {e}")
-    return images_data
+    def extract_text_from_image(self, image_url):
+        try:
+            response = requests.get(image_url, stream=True)
+            if response.status_code == 200:
+                image = Image.open(io.BytesIO(response.content))
+                text = pytesseract.image_to_string(image)
+                return text
+            return ""
+        except Exception as e:
+            print(f"Error processing image {image_url}: {e}")
+            return ""
 
-def find_forms(html_content, base_url, current_url):
-    """Finds forms in the HTML content, including those in iframes."""
-    soup = BeautifulSoup(html_content, 'html.parser')
-    form_data = []
-    for form_tag in soup.find_all('form'):
-        action = form_tag.get('action')
-        name = form_tag.get('name', 'Unnamed Form')
-        if action:
-            absolute_url = urljoin(base_url, action)
-            form_data.append({"url": absolute_url, "name": name})
-    # Check for iframes and scan their content for forms
-    for iframe_tag in soup.find_all('iframe'):
-        iframe_src = iframe_tag.get('src')
-        if iframe_src:
-            iframe_url = urljoin(base_url, iframe_src)
-            iframe_content, _ = fetch_page_content(iframe_url)
-            if iframe_content:
-                form_data.extend(find_forms(iframe_content, base_url, iframe_url))
-    return form_data
+    def crawl(self, url=None):
+        if url is None:
+            url = self.base_url
 
-def find_phone_numbers(html_content, current_url):
-    """Finds and formats phone numbers in the HTML content."""
-    phone_number_pattern = re.compile(
-        r'''
-        (?:Call(?:\s+us)?(?:\s+on)?|call/text|phone(?:\s+number)?|Toll(?:\s+free)?:?)?  # Optional preceding text
-        \s* # Optional whitespace
-        (\+?\d{1,4}[-\s.]?)?                 # Optional country code
-        \(?\d{2,4}\)?                       # Optional area code
-        [-\s.]?                              # Optional separator
-        \d{2,4}                               # First part
-        [-\s.]?                              # Optional separator
-        \d{3,4}                               # Last part
-        ([-\s.]?\d{3,5})?                     # Optional extension
-        ''',
-        re.VERBOSE | re.IGNORECASE
-    )
-    phone_numbers = set(re.findall(phone_number_pattern, html_content))
-    valid_phone_numbers = []
-    for number in phone_numbers:
-        if number is not None:  # Check if number is not None
-            cleaned_number = "".join(filter(str.isdigit, number))
-            if len(cleaned_number) >= 7:
-                valid_phone_numbers.append(number.strip())  # Keep the original formatting and strip whitespace
+        if url in self.visited or len(self.visited) >= self.max_pages:
+            return
 
-    return [{"number": number, "location": current_url} for number in set(valid_phone_numbers) if number is not None]
+        try:
+            print(f"Crawling: {url}")
+            self.visited.add(url)
+            response = requests.get(url, timeout=10)
+            soup = BeautifulSoup(response.text, 'html.parser')
 
-def crawl_website(start_url):
-    """Crawls the website and extracts information."""
-    if not is_valid_url(start_url):
-        st.error("Invalid URL provided.")
-        return
+            # 1. Find forms
+            forms = soup.find_all('form')
+            for form in forms:
+                form_name = form.get('id') or form.get('name') or form.get('aria-label') or "Unnamed Form"
+                form_action = form.get('action', url)
+                absolute_form_url = self.get_absolute_url(form_action)
+                self.forms.append({
+                    'url': absolute_form_url,
+                    'name': form_name
+                })
 
-    visited = set()
-    queue = [start_url]
-    base_url = urlparse(start_url).netloc
-    all_images = []
-    all_forms = []
-    all_phone_numbers = []
+            # 2. Find phone numbers in text
+            text = soup.get_text()
+            found_phones = self.phone_pattern.findall(text)
+            for match in found_phones:
+                phone = ''.join(match).strip()
+                if phone:
+                    self.phone_numbers.append({
+                        'phone': phone,
+                        'url': url
+                    })
 
-    with st.spinner(f"Crawling {start_url}..."):
-        while queue:
-            current_url = queue.pop(0)
-            if current_url in visited:
-                continue
-            visited.add(current_url)
-            st.info(f"Crawling: {current_url}")
+            # 3. Find images that might contain phone numbers
+            images = soup.find_all('img')
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                for img in images:
+                    img_src = img.get('src')
+                    if img_src:
+                        absolute_img_url = self.get_absolute_url(img_src)
+                        # Check if image URL looks like it might contain text (simple heuristic)
+                        if any(ext in absolute_img_url.lower() for ext in ['.png', '.jpg', '.jpeg']):
+                            # Submit image for processing
+                            executor.submit(self.process_image, absolute_img_url, url)
 
-            html_content, actual_url = fetch_page_content(current_url)
-            if html_content:
-                all_images.extend(find_images(html_content, start_url, actual_url))
-                all_forms.extend(find_forms(html_content, start_url, actual_url))
-                all_phone_numbers.extend(find_phone_numbers(html_content, actual_url))
+            # Find all links and crawl them
+            links = soup.find_all('a', href=True)
+            for link in links:
+                href = link['href']
+                absolute_url = self.get_absolute_url(href)
+                if self.is_valid_url(absolute_url) and absolute_url not in self.visited:
+                    self.crawl(absolute_url)
 
-                soup = BeautifulSoup(html_content, 'html.parser')
-                for link in soup.find_all('a', href=True):
-                    absolute_link = urljoin(current_url, link['href'])
-                    if base_url in absolute_link and absolute_link not in visited:
-                        queue.append(absolute_link)
-            time.sleep(0.1) # Adding a small delay
+        except Exception as e:
+            print(f"Error crawling {url}: {e}")
 
-    return all_images, all_forms, all_phone_numbers
+    def process_image(self, image_url, page_url):
+        text = self.extract_text_from_image(image_url)
+        if text:
+            found_phones = self.phone_pattern.findall(text)
+            for match in found_phones:
+                phone = ''.join(match).strip()
+                if phone:
+                    self.images_with_phones.append({
+                        'image_url': image_url,
+                        'page_url': page_url,
+                        'phone': phone
+                    })
 
-def display_images(images_data):
-    """Displays the extracted images in a grid format."""
-    st.subheader("Images Found:")
-    if images_data:
-        cols = st.columns(3)  # Adjust the number of columns as needed
-        for i, img_info in enumerate(images_data):
-            with cols[i % 3]:
-                st.image(img_info["image"], caption=f"Location: {img_info['location']}", use_column_width=True)
-                st.markdown(f"**Original URL:** {img_info['original_url']}")
-    else:
-        st.info("No images found on the crawled pages.")
+    def get_results(self):
+        return {
+            'forms': self.forms,
+            'phone_numbers': self.phone_numbers,
+            'images_with_phones': self.images_with_phones
+        }
 
-def display_forms(forms_data):
-    """Displays the extracted form URLs."""
-    st.subheader("Forms Found:")
-    if forms_data:
-        for form in forms_data:
-            st.markdown(f"**Forms URL:** {form['url']}")
-    else:
-        st.info("No forms found on the crawled pages.")
+    def print_results(self):
+        print("\nResults:")
+        
+        # 1. Forms
+        print("\n1) Forms:")
+        for form in self.forms:
+            print(f"URL: {form['url']} - Form Name: {form['name']}")
+        
+        # 2. Phone numbers
+        print("\n2) Phone Numbers:")
+        for phone in self.phone_numbers:
+            print(f"Phone: {phone['phone']} - Page URL: {phone['url']}")
+        
+        # 3. Images with phone numbers
+        print("\n3) Images with Phone Numbers:")
+        for img in self.images_with_phones:
+            print(f"Page URL: {img['page_url']}")
+            print(f"Image SRC: {img['image_url']}")
+            print(f"Phone in Image: {img['phone']}\n")
 
-def display_phone_numbers(phone_numbers_data):
-    """Displays the extracted phone numbers and their locations."""
-    st.subheader("Phone Numbers Found:")
-    if phone_numbers_data:
-        for phone_info in phone_numbers_data:
-            st.markdown(f"**Phone Number:** {phone_info['number']}")
-            st.markdown(f"**Page URL:** {phone_info['location']}")
-            st.divider()
-    else:
-        st.info("No phone numbers found on the crawled pages.")
-
-def main():
-    st.title("Web Crawler and Information Extractor")
-
-    start_url = st.text_input("Enter the URL of the website to crawl:")
-
-    if st.button("Start Crawling"):
-        if start_url:
-            images, forms, phone_numbers = crawl_website(start_url)
-            display_images(images)
-            display_forms(forms)
-            display_phone_numbers(phone_numbers)
-        else:
-            st.warning("Please enter a URL to start crawling.")
-
+# Usage example:
 if __name__ == "__main__":
-    main()
+    # Note: You'll need to install pytesseract and Tesseract OCR for image processing
+    # pip install pytesseract pillow
+    # Also install Tesseract OCR from https://github.com/tesseract-ocr/tesseract
+    
+    target_url = "https://example.com"  # Replace with your target URL
+    crawler = WebCrawler(target_url, max_pages=20)
+    crawler.crawl()
+    crawler.print_results()
