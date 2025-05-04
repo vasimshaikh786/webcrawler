@@ -1,16 +1,27 @@
 import streamlit as st
 import requests
+import re
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 
 # Initialize session state
 if 'form_urls' not in st.session_state:
     st.session_state.form_urls = []
+if 'phone_numbers' not in st.session_state:
+    st.session_state.phone_numbers = []
 
-def find_forms(base_url, max_pages=10):
+def find_elements(base_url, max_pages=10):
     visited = set()
     queue = [base_url]
     session = requests.Session()
+    
+    # Comprehensive phone number regex pattern
+    phone_pattern = re.compile(
+        r'(\b|\+)(\d{1,3})?[-. ]?\(?\d{3}\)?[-. ]?\d{3}[-. ]?\d{4}\b|'  # Standard US/Intl
+        r'\b\d{3}[-. ]?\d{4}\b|'  # Local numbers
+        r'\b(Toll[- ]?Free|Call|Phone|Tel|Telephone)[: ]?[- ]?(\d{3}[-. ]?)?\(?\d{3}\)?[-. ]?\d{3}[-. ]?\d{4}\b',  # Labeled numbers
+        re.IGNORECASE
+    )
     
     progress_bar = st.progress(0)
     status_text = st.empty()
@@ -26,7 +37,7 @@ def find_forms(base_url, max_pages=10):
                 # Update progress
                 progress = len(visited)/max_pages
                 progress_bar.progress(progress)
-                status_text.text(f"Crawling: {url[:50]}... ({len(visited)}/{max_pages} pages)")
+                status_text.text(f"🔍 Scanning: {url[:50]}... ({len(visited)}/{max_pages} pages)")
                 
                 response = session.get(url, timeout=10)
                 if response.status_code == 200:
@@ -36,6 +47,18 @@ def find_forms(base_url, max_pages=10):
                     if soup.find_all('form'):
                         st.session_state.form_urls.append(url)
                         st.success(f"✅ Form found at: {url}")
+                    
+                    # Check for phone numbers
+                    text = soup.get_text()
+                    for match in phone_pattern.finditer(text):
+                        phone = match.group()
+                        context = text[max(0, match.start()-20):match.end()+20].strip()
+                        st.session_state.phone_numbers.append({
+                            'phone': phone,
+                            'url': url,
+                            'context': context
+                        })
+                        st.success(f"📞 Phone number found: {phone}")
                     
                     visited.add(url)
                     
@@ -48,36 +71,47 @@ def find_forms(base_url, max_pages=10):
                                 queue.append(absolute_url)
                                 
             except Exception as e:
-                st.error(f"⚠️ Error crawling {url[:50]}...: {str(e)[:100]}")
+                st.error(f"⚠️ Error scanning {url[:50]}...: {str(e)[:100]}")
                 continue
                 
     finally:
         progress_bar.empty()
         status_text.empty()
 
-def display_form_urls():
-    st.subheader("📋 Pages with Forms", divider="rainbow")
+def display_results():
+    st.subheader("📋 Scan Results", divider="rainbow")
     
-    if st.session_state.form_urls:
-        # Create a beautiful expandable section for each form URL
-        for i, url in enumerate(st.session_state.form_urls, 1):
-            with st.expander(f"🔹 Form {i}: {url[:60]}..."):
+    # Forms section
+    with st.expander(f"📝 Forms Found ({len(st.session_state.form_urls)})", expanded=True):
+        if st.session_state.form_urls:
+            for i, url in enumerate(st.session_state.form_urls, 1):
                 st.markdown(f"""
-                **Full URL:**  
-                [{url}]({url})  
-                
-                **Quick Actions:**  
-                🔗 [Open in new tab]({url})  
-                📋 Copy to clipboard: `{url}`
+                **Form {i}:**  
+                🔗 [{url}]({url})  
+                📋 `{url}`
                 """)
-        
-        st.toast(f"Found {len(st.session_state.form_urls)} form pages!", icon="🎉")
-    else:
-        st.warning("No forms found on the scanned pages.")
+        else:
+            st.warning("No forms found")
+    
+    # Phone numbers section
+    with st.expander(f"📞 Phone Numbers Found ({len(st.session_state.phone_numbers)})", expanded=True):
+        if st.session_state.phone_numbers:
+            cols = st.columns([1, 3, 6])
+            cols[0].markdown("**#**")
+            cols[1].markdown("**Phone Number**")
+            cols[2].markdown("**Found On Page**")
+            
+            for i, item in enumerate(st.session_state.phone_numbers, 1):
+                cols = st.columns([1, 3, 6])
+                cols[0].markdown(f"{i}.")
+                cols[1].markdown(f"`{item['phone']}`")
+                cols[2].markdown(f"[{item['url'][:50]}...]({item['url']})  \n*(...{item['context']}...)*")
+        else:
+            st.warning("No phone numbers found")
 
 def main():
-    st.title("🔍 Form URL Finder")
-    st.markdown("This tool crawls a website to find pages containing forms.")
+    st.title("🔍 Website Scanner Pro")
+    st.markdown("Find forms and phone numbers on any website")
     
     col1, col2 = st.columns(2)
     with col1:
@@ -85,12 +119,14 @@ def main():
     with col2:
         max_pages = st.number_input("Max pages to scan:", min_value=1, max_value=50, value=10)
     
-    if st.button("🚀 Start Scanning", type="primary"):
-        st.session_state.form_urls = []  # Reset previous results
-        find_forms(base_url, max_pages)
+    if st.button("🚀 Start Scan", type="primary"):
+        st.session_state.form_urls = []
+        st.session_state.phone_numbers = []
+        find_elements(base_url, max_pages)
+        st.toast("Scan completed!", icon="🎉")
     
-    if st.session_state.form_urls:
-        display_form_urls()
+    if st.session_state.form_urls or st.session_state.phone_numbers:
+        display_results()
 
 if __name__ == "__main__":
     main()
